@@ -190,6 +190,7 @@ struct matrix_geometry {
 
     size_t pixels_across, n_addr_lines, n_lanes;
     size_t width, height;
+    bool interleaved = false;
     matrix_map map;
     schedule_sequence schedules;
 };
