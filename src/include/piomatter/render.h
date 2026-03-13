@@ -193,52 +193,69 @@ void protomatter_render_rgb10(std::vector<uint32_t> &result,
     size_t prev_addr = n_addr - 1;
     uint32_t addr_bits = calc_addr_bits(prev_addr);
 
-    for (size_t addr = 0; addr < n_addr; addr++) {
-        for (auto &schedule_ent : sched) {
-            uint32_t r_mask = 1 << (20 + schedule_ent.shift);
-            uint32_t g_mask = 1 << (10 + schedule_ent.shift);
-            uint32_t b_mask = 1 << (0 + schedule_ent.shift);
+    auto emit_plane = [&](const schedule_entry &schedule_ent, size_t addr) {
+        uint32_t r_mask = 1 << (20 + schedule_ent.shift);
+        uint32_t g_mask = 1 << (10 + schedule_ent.shift);
+        uint32_t b_mask = 1 << (0 + schedule_ent.shift);
 
-            prep_data(pixels_across);
-            auto mapiter = matrixmap.map.begin() +
-                           matrixmap.n_lanes * addr * pixels_across;
-            for (size_t x = 0; x < pixels_across; x++) {
-                uint32_t data = addr_bits;
-                for (size_t px = 0; px < matrixmap.n_lanes; px++) {
-                    assert(mapiter != matrixmap.map.end());
-                    auto pixel0 = pixels[*mapiter++];
-                    auto r_bit = pixel0 & r_mask;
-                    auto g_bit = pixel0 & g_mask;
-                    auto b_bit = pixel0 & b_mask;
+        prep_data(pixels_across);
+        auto mapiter = matrixmap.map.begin() +
+                       matrixmap.n_lanes * addr * pixels_across;
+        for (size_t x = 0; x < pixels_across; x++) {
+            uint32_t data = addr_bits;
+            for (size_t px = 0; px < matrixmap.n_lanes; px++) {
+                assert(mapiter != matrixmap.map.end());
+                auto pixel0 = pixels[*mapiter++];
+                auto r_bit = pixel0 & r_mask;
+                auto g_bit = pixel0 & g_mask;
+                auto b_bit = pixel0 & b_mask;
 
-                    if (r_bit)
-                        data |= (1 << pinout::PIN_RGB[px * 3 + 0]);
-                    if (g_bit)
-                        data |= (1 << pinout::PIN_RGB[px * 3 + 1]);
-                    if (b_bit)
-                        data |= (1 << pinout::PIN_RGB[px * 3 + 2]);
-                }
-
-                do_data_clk_active(data);
+                if (r_bit)
+                    data |= (1 << pinout::PIN_RGB[px * 3 + 0]);
+                if (g_bit)
+                    data |= (1 << pinout::PIN_RGB[px * 3 + 1]);
+                if (b_bit)
+                    data |= (1 << pinout::PIN_RGB[px * 3 + 2]);
             }
 
-            do_data_delay(addr_bits | pinout::oe_active,
-                          active_time * CLOCKS_PER_DATA / CLOCKS_PER_DELAY -
-                              DELAY_OVERHEAD);
+            do_data_clk_active(data);
+        }
 
+        do_data_delay(addr_bits | pinout::oe_active,
+                      active_time * CLOCKS_PER_DATA / CLOCKS_PER_DELAY -
+                          DELAY_OVERHEAD);
+
+        do_data_delay(addr_bits | pinout::oe_inactive,
+                      pinout::post_oe_delay);
+        do_data_delay(addr_bits | pinout::oe_inactive | pinout::lat_bit,
+                      pinout::post_latch_delay);
+
+        active_time = schedule_ent.active_time * brightness;
+
+        // with oe inactive, set address bits to illuminate THIS line
+        if (addr != prev_addr) {
+            addr_bits = calc_addr_bits(addr);
             do_data_delay(addr_bits | pinout::oe_inactive,
-                          pinout::post_oe_delay);
-            do_data_delay(addr_bits | pinout::oe_inactive | pinout::lat_bit,
-                          pinout::post_latch_delay);
+                          pinout::post_addr_delay);
+            prev_addr = addr;
+        }
+    };
 
-            active_time = schedule_ent.active_time * brightness;
-
-            // with oe inactive, set address bits to illuminate THIS line
-            if (addr != prev_addr) {
-                addr_bits = calc_addr_bits(addr);
-                do_data_delay(addr_bits | pinout::oe_inactive,
-                              pinout::post_addr_delay);
-                prev_addr = addr;
+    if (matrixmap.interleaved) {
+        // Interleaved scan: each plane is scanned across all addresses before
+        // moving to the next plane. Increases refresh rate of the most visible
+        // planes, reducing flicker. May cause banding during fast motion.
+        for (size_t p = 0; p < sched.size(); p++) {
+            for (size_t addr = 0; addr < n_addr; addr++) {
+                emit_plane(sched[p], addr);
+            }
+        }
+    } else {
+        // Grouped scan: all planes per address before moving to the next.
+        // No motion artifacts, but lower per-plane refresh rate (more flicker).
+        for (size_t addr = 0; addr < n_addr; addr++) {
+            for (size_t p = 0; p < sched.size(); p++) {
+                emit_plane(sched[p], addr);
             }
         }
     }
